@@ -104,7 +104,19 @@ async def main():
             ),
             browser=browser,
             tools=tools,
-            use_vision=True,
+            use_vision=False,
+            extend_system_message="""
+OUTPUT FORMAT — STRICT:
+Return exactly one valid raw JSON object and nothing else.
+Do not use Markdown code fences, DSML, XML, <think>, <action>,
+tool-call wrappers, or explanatory text outside the JSON object.
+The JSON may contain a "thinking" field, but its value must be a normal
+JSON string without <think> tags.
+Actions must appear only in the top-level "action" array and must use
+the exact action names and parameter names from the supplied JSON Schema.
+Before responding, verify that the top-level "action" field exists and
+contains at least one schema-valid action.
+""",
         )
 
         result = await agent.run()
