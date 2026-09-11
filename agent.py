@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, SecretStr
 
 from browser_use import Agent, AgentHistoryList, Browser, ChatOpenAI, Tools
 
@@ -21,11 +22,44 @@ OPTIONAL_TOOL_NAMES = {
 }
 
 
+class LoginConfig(BaseModel):
+    """Validated login settings loaded from environment variables."""
+
+    username: SecretStr
+    password: SecretStr
+    totp_secret: SecretStr | None = None
+    success_criteria: str = '页面不再显示登录表单，并进入登录后的目标页面'
+    max_attempts: int = Field(default=2, ge=1, le=5)
+    agent_max_failures: int = Field(default=5, ge=1, le=20)
+
+
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f'Missing required environment variable: {name}')
     return value
+
+
+def load_login_config() -> LoginConfig:
+    """Load login settings, accepting legacy SITE_* credential names."""
+    username = os.getenv('LOGIN_USERNAME') or os.getenv('SITE_USERNAME')
+    password = os.getenv('LOGIN_PASSWORD') or os.getenv('SITE_PASSWORD')
+    if not username:
+        raise RuntimeError('Missing required environment variable: LOGIN_USERNAME')
+    if not password:
+        raise RuntimeError('Missing required environment variable: LOGIN_PASSWORD')
+
+    return LoginConfig(
+        username=username,
+        password=password,
+        totp_secret=os.getenv('LOGIN_TOTP_SECRET') or None,
+        success_criteria=os.getenv(
+            'LOGIN_SUCCESS_CRITERIA',
+            '页面不再显示登录表单，并进入登录后的目标页面',
+        ),
+        max_attempts=os.getenv('LOGIN_MAX_ATTEMPTS', '2'),
+        agent_max_failures=os.getenv('AGENT_MAX_FAILURES', '5'),
+    )
 
 
 def build_tools() -> Tools:
@@ -75,6 +109,7 @@ async def main():
     openai_model = os.getenv('OPENAI_MODEL', 'gpt-5.5')
     target_url = require_env('TARGET_URL')
     after_login_task = require_env('AFTER_LOGIN_TASK')
+    login_config = load_login_config()
 
     parsed_url = urlparse(target_url)
     if parsed_url.scheme not in {'http', 'https'} or not parsed_url.netloc:
@@ -86,14 +121,27 @@ async def main():
     await browser.start()
 
     try:
-        await browser.navigate_to(target_url)
-        await asyncio.to_thread(
-            input,
-            '\n请在浏览器中手动完成登录，确认进入系统后，回到终端按 Enter 继续... ',
-        )
+        sensitive_values = {
+            'login_username': login_config.username.get_secret_value(),
+            'login_password': login_config.password.get_secret_value(),
+        }
+        totp_instruction = '如出现 2FA，请停止并报告需要人工处理。'
+        if login_config.totp_secret:
+            sensitive_values['login_bu_2fa_code'] = login_config.totp_secret.get_secret_value()
+            totp_instruction = '如出现 TOTP 2FA，输入 <secret>login_bu_2fa_code</secret>。'
+
+        login_task = f"""
+使用 navigate 动作打开 {target_url}。
+定位登录表单，输入 <secret>login_username</secret> 和 <secret>login_password</secret>，然后提交。
+登录提交最多尝试 {login_config.max_attempts} 次。
+{totp_instruction}
+登录成功标准：{login_config.success_criteria}
+确认登录成功后再执行以下任务：
+{after_login_task}
+""".strip()
 
         agent = Agent(
-            task=after_login_task,
+            task=login_task,
             llm=ChatOpenAI(
                 model=openai_model,
                 api_key=openai_api_key,
@@ -104,6 +152,8 @@ async def main():
             ),
             browser=browser,
             tools=tools,
+            sensitive_data={origin: sensitive_values},
+            max_failures=login_config.agent_max_failures,
             use_vision=False,
             extend_system_message="""
 OUTPUT FORMAT — STRICT:
