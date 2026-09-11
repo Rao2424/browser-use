@@ -123,7 +123,7 @@ async def main():
     openai_api_key = require_env('OPENAI_API_KEY')
     openai_base_url = os.getenv('OPENAI_BASE_URL', 'https://api.duckcoding.ai/v1')
     openai_model = os.getenv('OPENAI_MODEL', 'gpt-5.5')
-    target_url = require_env('TARGET_URL')
+    target_url = require_env('TARGET_URL').strip()
     after_login_task = require_env('AFTER_LOGIN_TASK')
     login_config = load_login_config()
 
@@ -147,7 +147,7 @@ async def main():
             totp_instruction = '如出现 TOTP 2FA，输入 <secret>login_bu_2fa_code</secret>。'
 
         login_task = f"""
-使用 navigate 动作打开 {target_url}。
+使用 navigate 动作打开 {target_url}
 定位登录表单，输入 <secret>login_username</secret> 和 <secret>login_password</secret>，然后提交。
 登录提交最多尝试 {login_config.max_attempts} 次。
 {totp_instruction}
@@ -170,6 +170,7 @@ async def main():
             browser=browser,
             tools=tools,
             sensitive_data={origin: sensitive_values},
+            initial_actions=[{'navigate': {'url': target_url, 'new_tab': False}}],
             max_failures=login_config.agent_max_failures,
             use_vision='auto',
             extend_system_message="""
