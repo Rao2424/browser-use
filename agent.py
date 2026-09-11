@@ -76,6 +76,7 @@ def build_tools() -> Tools:
 
     disabled_tools = sorted(OPTIONAL_TOOL_NAMES - enabled_optional_tools)
     tools = Tools(exclude_actions=disabled_tools)
+    tools.set_coordinate_clicking(True)
 
     @tools.action(
         'Pause for a human to complete CAPTCHA, QR-code scanning, or another interactive verification step.'
