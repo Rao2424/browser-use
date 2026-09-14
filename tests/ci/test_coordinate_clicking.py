@@ -4,6 +4,9 @@ This feature allows certain models (Claude Sonnet 4, Claude Opus 4, Gemini 3 Pro
 to use coordinate-based clicking, while other models only get index-based clicking.
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from browser_use.tools.service import Tools
@@ -62,6 +65,67 @@ class TestCoordinateClickingTools:
 		assert 'index' in schema['properties']
 		assert 'coordinate_x' in schema['properties']
 		assert 'coordinate_y' in schema['properties']
+		assert 'target_hint' in schema['properties']
+
+	@pytest.mark.asyncio
+	async def test_coordinate_click_requires_target_hint(self):
+		"""Coordinate clicks must identify the intended visible target."""
+		tools = Tools()
+		tools.set_coordinate_clicking(True)
+
+		result = await tools._click_by_coordinate(ClickElementAction(coordinate_x=10, coordinate_y=20), AsyncMock())
+
+		assert result.error is not None
+		assert 'require target_hint' in result.error
+
+	@pytest.mark.asyncio
+	async def test_coordinate_click_rejects_mismatched_target(self):
+		"""A coordinate whose DOM label differs from target_hint must not be clicked."""
+		tools = Tools()
+		tools.set_coordinate_clicking(True)
+		cdp_client = SimpleNamespace(
+			send=SimpleNamespace(
+				Runtime=SimpleNamespace(
+					evaluate=AsyncMock(
+						return_value={
+							'result': {
+								'value': {
+									'matched': False,
+									'reason': 'Element text does not match',
+									'tag': 'a',
+									'text': '530800',
+								}
+							}
+						}
+					)
+				)
+			)
+		)
+		browser_session = SimpleNamespace(
+			llm_screenshot_size=(1440, 900),
+			_original_viewport_size=(1694, 827),
+			get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(cdp_client=cdp_client, session_id='session-id')),
+		)
+
+		result = await tools._click_by_coordinate(
+			ClickElementAction(coordinate_x=491, coordinate_y=713, target_hint='ETF'),
+			browser_session,
+		)
+
+		assert result.error is not None
+		assert 'expected "ETF"' in result.error
+		assert 'found "530800"' in result.error
+		assert result.metadata == {
+			'click_x': 577,
+			'click_y': 655,
+			'target_hint': 'ETF',
+			'coordinate_validation': {
+				'matched': False,
+				'reason': 'Element text does not match',
+				'tag': 'a',
+				'text': '530800',
+			},
+		}
 
 	def test_disable_coordinate_clicking(self):
 		"""Disabling coordinate clicking should switch back to index-only."""

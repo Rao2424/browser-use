@@ -625,6 +625,68 @@ class Tools(Generic[Context]):
 				return actual_x, actual_y
 			return llm_x, llm_y
 
+		async def _validate_coordinate_target(
+			coordinate_x: int,
+			coordinate_y: int,
+			target_hint: str,
+			browser_session: BrowserSession,
+		) -> dict:
+			"""Verify that a coordinate resolves to the expected visible label before clicking."""
+			validation_script = rf"""
+(function() {{
+	const coordinateX = {json.dumps(coordinate_x)};
+	const coordinateY = {json.dumps(coordinate_y)};
+	const expectedText = {json.dumps(target_hint)};
+	const normalize = (value) => String(value || '').replace(/\s+/g, '').trim().toLocaleLowerCase();
+	const expected = normalize(expectedText);
+	const element = document.elementFromPoint(coordinateX, coordinateY);
+	if (!element) {{
+		return {{matched: false, reason: 'No element exists at the coordinate'}};
+	}}
+
+	let current = element;
+	for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {{
+		if (current === document.body || current === document.documentElement) break;
+		const labels = [
+			current.innerText,
+			current.getAttribute('aria-label'),
+			current.getAttribute('title'),
+			current.getAttribute('alt'),
+			current.getAttribute('value'),
+		].filter(Boolean);
+		const matchedLabel = labels.find((label) => normalize(label) === expected);
+		if (matchedLabel) {{
+			return {{
+				matched: true,
+				tag: current.tagName.toLowerCase(),
+				text: String(matchedLabel).trim().slice(0, 200),
+				depth: depth,
+			}};
+		}}
+	}}
+
+	return {{
+		matched: false,
+		reason: 'Element text or accessible label does not exactly match target_hint',
+		tag: element.tagName.toLowerCase(),
+		text: String(element.innerText || element.getAttribute('aria-label') || '').trim().slice(0, 200),
+	}};
+}})()
+"""
+			cdp_session = await browser_session.get_or_create_cdp_session(focus=True)
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': validation_script, 'returnByValue': True, 'awaitPromise': False},
+				session_id=cdp_session.session_id,
+			)
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JavaScript error')
+				raise RuntimeError(f'Coordinate target validation failed: {error_text}')
+
+			validation_result = result.get('result', {}).get('value')
+			if not isinstance(validation_result, dict):
+				raise RuntimeError('Coordinate target validation returned no usable result')
+			return validation_result
+
 		# Element Interaction Actions
 		async def _detect_new_tab_opened(
 			browser_session: BrowserSession,
@@ -657,12 +719,38 @@ class Tools(Generic[Context]):
 			# Ensure coordinates are provided (type safety)
 			if params.coordinate_x is None or params.coordinate_y is None:
 				return ActionResult(error='Both coordinate_x and coordinate_y must be provided')
+			if not params.target_hint or not params.target_hint.strip():
+				return ActionResult(
+					error='Coordinate clicks require target_hint with the exact visible text or accessible label.'
+				)
 
 			try:
 				# Convert coordinates from LLM size to original viewport size if resizing was used
 				actual_x, actual_y = _convert_llm_coordinates_to_viewport(
 					params.coordinate_x, params.coordinate_y, browser_session
 				)
+				validation_result = await _validate_coordinate_target(
+					actual_x,
+					actual_y,
+					params.target_hint.strip(),
+					browser_session,
+				)
+				if not validation_result.get('matched'):
+					actual_element = validation_result.get('text') or validation_result.get('tag') or 'unknown element'
+					reason = validation_result.get('reason', 'target mismatch')
+					return ActionResult(
+						error=(
+							f'Coordinate click rejected: expected "{params.target_hint.strip()}", '
+							f'but found "{actual_element}" at viewport ({actual_x}, {actual_y}). '
+							f'{reason}. Take a fresh screenshot and locate the target again.'
+						),
+						metadata={
+							'click_x': actual_x,
+							'click_y': actual_y,
+							'target_hint': params.target_hint.strip(),
+							'coordinate_validation': validation_result,
+						},
+					)
 
 				# Capture tab IDs before click to detect new tabs
 				tabs_before = {t.target_id for t in await browser_session.get_tabs()}
@@ -674,9 +762,9 @@ class Tools(Generic[Context]):
 					suppress_exceptions=True,
 				)
 
-				# Dispatch ClickCoordinateEvent - handler will check for safety and click
+				# Dispatch without force so the browser-level file/select/print safety checks also run.
 				event = browser_session.event_bus.dispatch(
-					ClickCoordinateEvent(coordinate_x=actual_x, coordinate_y=actual_y, force=True)
+					ClickCoordinateEvent(coordinate_x=actual_x, coordinate_y=actual_y, force=False)
 				)
 				await event
 				# Wait for handler to complete and get any exception or metadata
@@ -693,7 +781,12 @@ class Tools(Generic[Context]):
 
 				return ActionResult(
 					extracted_content=memory,
-					metadata={'click_x': actual_x, 'click_y': actual_y},
+					metadata={
+						'click_x': actual_x,
+						'click_y': actual_y,
+						'target_hint': params.target_hint.strip(),
+						'coordinate_validation': validation_result,
+					},
 				)
 			except BrowserError as e:
 				return handle_browser_error(e)
@@ -2126,7 +2219,8 @@ Validated Code (after quote fixing):
 		if self._coordinate_clicking_enabled:
 			# Register click action WITH coordinate support
 			@self.registry.action(
-				'Click element by index or coordinates. Use coordinates only if the index is not available. Either provide coordinates or index.',
+				'Click element by index or coordinates. Use coordinates only if the index is not available. '
+				'Coordinate clicks require coordinate_x, coordinate_y, and target_hint containing the exact visible text or accessible label.',
 				param_model=ClickElementAction,
 			)
 			async def click(params: ClickElementAction, browser_session: BrowserSession):
