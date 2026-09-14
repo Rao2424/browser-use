@@ -184,6 +184,13 @@ When using click with coordinate_x and coordinate_y, always provide target_hint
 with the exact visible text or accessible label of the intended element.
 Do not manually scale screenshot coordinates. If validation rejects a click,
 take a fresh screenshot and locate the target again before retrying.
+
+ASYNC PAGE UPDATES:
+After search, filter, or submit actions that update the page without navigation,
+use wait_for_page_condition before evaluating the result. Prefer text_changed with
+the previously observed value, an expected result text or selected attribute, or a
+loading element becoming hidden. Require a stable result and do not treat the
+immediate post-action state or a fixed sleep alone as final.
 """,
 		)
 

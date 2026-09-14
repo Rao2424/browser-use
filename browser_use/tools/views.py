@@ -1,6 +1,6 @@
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 
@@ -64,6 +64,37 @@ class NavigateAction(BaseModel):
 
 # Backward compatibility alias
 GoToUrlAction = NavigateAction
+
+
+class WaitForPageConditionAction(BaseModel):
+	selector: str = Field(min_length=1, max_length=500, description='CSS selector for the element to observe')
+	condition: Literal[
+		'exists',
+		'visible',
+		'hidden',
+		'text_contains',
+		'text_equals',
+		'text_changed',
+		'attribute_equals',
+		'attribute_contains',
+	] = Field(default='visible', description='Condition that must remain true for stable_milliseconds')
+	expected_value: str | None = Field(default=None, max_length=1000)
+	previous_value: str | None = Field(default=None, max_length=1000)
+	attribute: str | None = Field(default=None, min_length=1, max_length=200)
+	timeout_seconds: float = Field(default=10.0, ge=0.5, le=30.0)
+	poll_interval_ms: int = Field(default=250, ge=100, le=2000)
+	stable_milliseconds: int = Field(default=500, ge=0, le=5000)
+
+	@model_validator(mode='after')
+	def validate_condition_arguments(self) -> 'WaitForPageConditionAction':
+		if self.condition in {'text_contains', 'text_equals'} and self.expected_value is None:
+			raise ValueError(f'expected_value is required for {self.condition}')
+		if self.condition == 'text_changed' and self.previous_value is None:
+			raise ValueError('previous_value is required for text_changed')
+		if self.condition in {'attribute_equals', 'attribute_contains'}:
+			if self.attribute is None or self.expected_value is None:
+				raise ValueError(f'attribute and expected_value are required for {self.condition}')
+		return self
 
 
 class ClickElementAction(BaseModel):

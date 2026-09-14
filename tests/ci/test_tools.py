@@ -55,6 +55,24 @@ def http_server():
 		content_type='text/html',
 	)
 
+	server.expect_request('/async-update').respond_with_data(
+		"""
+		<html>
+		<body>
+			<div id="loading">Loading</div>
+			<div id="result-count">1118</div>
+			<script>
+				setTimeout(() => {
+					document.getElementById('result-count').textContent = '127';
+					document.getElementById('loading').style.display = 'none';
+				}, 300);
+			</script>
+		</body>
+		</html>
+		""",
+		content_type='text/html',
+	)
+
 	yield server
 	server.stop()
 
@@ -102,6 +120,7 @@ class TestToolsIntegration:
 			'switch',
 			'close',
 			'wait',
+			'wait_for_page_condition',
 		]
 
 		for action in common_actions:
@@ -182,6 +201,42 @@ class TestToolsIntegration:
 		assert 'Waited for' in result.extracted_content or 'Waiting for' in result.extracted_content
 
 		assert 3.5 <= end_time - start_time <= 4.5  # We wait 5-1 seconds for LLM call
+
+	async def test_wait_for_async_page_condition(self, tools, browser_session, base_url):
+		await tools.navigate(url=f'{base_url}/async-update', new_tab=False, browser_session=browser_session)
+
+		result = await tools.wait_for_page_condition(
+			selector='#result-count',
+			condition='text_changed',
+			previous_value='1118',
+			timeout_seconds=3,
+			poll_interval_ms=100,
+			stable_milliseconds=200,
+			browser_session=browser_session,
+		)
+
+		assert result.error is None
+		assert result.metadata is not None
+		assert result.metadata['observed_value'] == '127'
+		assert result.metadata['elapsed_seconds'] >= 0.4
+
+	async def test_wait_for_page_condition_times_out_with_observation(self, tools, browser_session, base_url):
+		await tools.navigate(url=f'{base_url}/page1', new_tab=False, browser_session=browser_session)
+
+		result = await tools.wait_for_page_condition(
+			selector='h1',
+			condition='text_equals',
+			expected_value='Never appears',
+			timeout_seconds=0.5,
+			poll_interval_ms=100,
+			stable_milliseconds=0,
+			browser_session=browser_session,
+		)
+
+		assert result.error is not None
+		assert 'Timed out' in result.error
+		assert result.metadata is not None
+		assert result.metadata['observed_value'] == 'Test Page 1'
 
 	async def test_go_back_action(self, tools, browser_session, base_url):
 		"""Test that go_back action navigates to the previous page."""

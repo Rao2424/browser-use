@@ -58,6 +58,7 @@ from browser_use.tools.views import (
 	StructuredOutputAction,
 	SwitchTabAction,
 	UploadFileAction,
+	WaitForPageConditionAction,
 )
 from browser_use.utils import create_task_with_error_handling, sanitize_surrogates, time_execution_sync
 
@@ -606,6 +607,142 @@ class Tools(Generic[Context]):
 			logger.info(f'🕒 waited for {seconds} second{"" if seconds == 1 else "s"}')
 			await asyncio.sleep(actual_seconds)
 			return ActionResult(extracted_content=memory, long_term_memory=memory)
+
+		@self.registry.action(
+			'Wait for an asynchronous page update by polling a CSS selector until a business condition remains stable. '
+			'Use after search, filter, submit, or other actions that update the page without navigation. '
+			'Prefer text_changed with the previously observed value, a loading element becoming hidden, or an expected text/attribute value.',
+			param_model=WaitForPageConditionAction,
+		)
+		async def wait_for_page_condition(params: WaitForPageConditionAction, browser_session: BrowserSession):
+			condition_script = rf"""
+(() => {{
+	const selector = {json.dumps(params.selector)};
+	const condition = {json.dumps(params.condition)};
+	const expectedValue = {json.dumps(params.expected_value)};
+	const previousValue = {json.dumps(params.previous_value)};
+	const attributeName = {json.dumps(params.attribute)};
+	const normalize = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+
+	let element;
+	try {{
+		element = document.querySelector(selector);
+	}} catch (error) {{
+		return {{ error: `Invalid CSS selector: ${{error.message}}` }};
+	}}
+
+	const exists = Boolean(element);
+	let visible = false;
+	let text = '';
+	let attributeValue = null;
+	if (element) {{
+		const style = window.getComputedStyle(element);
+		const rect = element.getBoundingClientRect();
+		visible = rect.width > 0 && rect.height > 0 && style.display !== 'none'
+			&& style.visibility !== 'hidden' && style.opacity !== '0';
+		text = normalize(element.innerText ?? element.textContent);
+		if (attributeName !== null) attributeValue = element.getAttribute(attributeName);
+	}}
+
+	const expected = expectedValue === null ? null : normalize(expectedValue);
+	const previous = previousValue === null ? null : normalize(previousValue);
+	const normalizedAttribute = attributeValue === null ? null : normalize(attributeValue);
+	let matched = false;
+	if (condition === 'exists') matched = exists;
+	else if (condition === 'visible') matched = visible;
+	else if (condition === 'hidden') matched = !exists || !visible;
+	else if (condition === 'text_contains') matched = exists && text.includes(expected);
+	else if (condition === 'text_equals') matched = exists && text === expected;
+	else if (condition === 'text_changed') matched = exists && text !== previous;
+	else if (condition === 'attribute_equals') matched = exists && normalizedAttribute === expected;
+	else if (condition === 'attribute_contains') matched = exists && normalizedAttribute !== null
+		&& normalizedAttribute.includes(expected);
+
+	return {{
+		matched,
+		exists,
+		visible,
+		text: text.slice(0, 1000),
+		attributeValue: attributeValue === null ? null : String(attributeValue).slice(0, 1000),
+	}};
+}})()
+"""
+			started_at = asyncio.get_running_loop().time()
+			matched_since: float | None = None
+			last_observation: dict = {}
+			cdp_session = await browser_session.get_or_create_cdp_session(focus=True)
+
+			while True:
+				try:
+					result = await cdp_session.cdp_client.send.Runtime.evaluate(
+						params={'expression': condition_script, 'returnByValue': True, 'awaitPromise': False},
+						session_id=cdp_session.session_id,
+					)
+				except Exception as error:
+					return ActionResult(error=f'Failed to evaluate page condition: {error}')
+
+				if result.get('exceptionDetails'):
+					error_text = result['exceptionDetails'].get('text', 'Unknown JavaScript error')
+					return ActionResult(error=f'Failed to evaluate page condition: {error_text}')
+
+				observation = result.get('result', {}).get('value')
+				if not isinstance(observation, dict):
+					return ActionResult(error='Page condition returned no usable result')
+				if observation.get('error'):
+					return ActionResult(error=f'Failed to evaluate page condition: {observation["error"]}')
+				last_observation = observation
+
+				now = asyncio.get_running_loop().time()
+				if observation.get('matched'):
+					matched_since = matched_since or now
+					stable_seconds = now - matched_since
+					if stable_seconds * 1000 >= params.stable_milliseconds:
+						elapsed_seconds = now - started_at
+						observed_value = (
+							observation.get('attributeValue')
+							if params.condition.startswith('attribute_')
+							else observation.get('text')
+						)
+						memory = (
+							f'Page condition {params.condition} matched for selector "{params.selector}" '
+							f'after {elapsed_seconds:.2f}s; observed value: {observed_value!r}'
+						)
+						logger.info(f'✅ {memory}')
+						return ActionResult(
+							extracted_content=memory,
+							long_term_memory=memory,
+							metadata={
+								'selector': params.selector,
+								'condition': params.condition,
+								'observed_value': observed_value,
+								'elapsed_seconds': elapsed_seconds,
+							},
+						)
+				else:
+					matched_since = None
+
+				elapsed_seconds = now - started_at
+				if elapsed_seconds >= params.timeout_seconds:
+					observed_value = (
+						last_observation.get('attributeValue')
+						if params.condition.startswith('attribute_')
+						else last_observation.get('text')
+					)
+					return ActionResult(
+						error=(
+							f'Timed out after {params.timeout_seconds:.1f}s waiting for {params.condition} '
+							f'on selector "{params.selector}"; last observed value: {observed_value!r}'
+						),
+						metadata={
+							'selector': params.selector,
+							'condition': params.condition,
+							'observed_value': observed_value,
+							'elapsed_seconds': elapsed_seconds,
+						},
+					)
+
+				remaining_seconds = params.timeout_seconds - elapsed_seconds
+				await asyncio.sleep(min(params.poll_interval_ms / 1000, remaining_seconds))
 
 		# Helper function for coordinate conversion
 		def _convert_llm_coordinates_to_viewport(llm_x: int, llm_y: int, browser_session: BrowserSession) -> tuple[int, int]:
