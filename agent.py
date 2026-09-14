@@ -42,6 +42,15 @@ def require_env(name: str) -> str:
 	return value
 
 
+def prepare_downloads_path() -> Path:
+	"""Resolve and create the configured browser download directory."""
+	configured_path = os.getenv('DOWNLOADS_PATH', '').strip()
+	downloads_path = Path(configured_path).expanduser() if configured_path else Path.home() / 'Downloads' / 'browser-use'
+	downloads_path = downloads_path.resolve()
+	downloads_path.mkdir(parents=True, exist_ok=True)
+	return downloads_path
+
+
 def load_login_config() -> LoginConfig:
 	"""Load login settings, accepting legacy SITE_* credential names."""
 	username = os.getenv('LOGIN_USERNAME') or os.getenv('SITE_USERNAME')
@@ -119,14 +128,16 @@ async def main():
 	target_url = require_env('TARGET_URL').strip()
 	after_login_task = require_env('AFTER_LOGIN_TASK')
 	login_config = load_login_config()
+	downloads_path = prepare_downloads_path()
 
 	parsed_url = urlparse(target_url)
 	if parsed_url.scheme not in {'http', 'https'} or not parsed_url.netloc:
 		raise ValueError('TARGET_URL must be a complete http:// or https:// URL')
 
 	origin = f'{parsed_url.scheme}://{parsed_url.netloc}'
-	browser = Browser(headless=False, allowed_domains=[origin])
+	browser = Browser(headless=False, allowed_domains=[origin], downloads_path=downloads_path)
 	tools = build_tools()
+	print(f'下载目录: {downloads_path}')
 	await browser.start()
 
 	try:
