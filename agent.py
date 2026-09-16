@@ -25,10 +25,10 @@ OPTIONAL_TOOL_NAMES = {
 
 
 class LoginConfig(BaseModel):
-	"""Validated login settings loaded from environment variables."""
+	"""Validated optional login settings loaded from environment variables."""
 
-	username: SecretStr
-	password: SecretStr
+	username: SecretStr | None = None
+	password: SecretStr | None = None
 	totp_secret: SecretStr | None = None
 	success_criteria: str = '页面不再显示登录表单，并进入登录后的目标页面'
 	max_attempts: int = Field(default=2, ge=1, le=5)
@@ -52,13 +52,11 @@ def prepare_downloads_path() -> Path:
 
 
 def load_login_config() -> LoginConfig:
-	"""Load login settings, accepting legacy SITE_* credential names."""
+	"""Load optional login settings, accepting legacy SITE_* credential names."""
 	username = os.getenv('LOGIN_USERNAME') or os.getenv('SITE_USERNAME')
 	password = os.getenv('LOGIN_PASSWORD') or os.getenv('SITE_PASSWORD')
-	if not username:
-		raise RuntimeError('Missing required environment variable: LOGIN_USERNAME')
-	if not password:
-		raise RuntimeError('Missing required environment variable: LOGIN_PASSWORD')
+	if bool(username) != bool(password):
+		raise RuntimeError('LOGIN_USERNAME and LOGIN_PASSWORD must both be set or both be omitted')
 
 	return LoginConfig(
 		username=username,
@@ -141,16 +139,18 @@ async def main():
 	await browser.start()
 
 	try:
-		sensitive_values = {
-			'login_username': login_config.username.get_secret_value(),
-			'login_password': login_config.password.get_secret_value(),
-		}
-		totp_instruction = '如出现 TOTP 2FA，调用 request_human_verification。'
-		if login_config.totp_secret:
-			sensitive_values['login_bu_2fa_code'] = login_config.totp_secret.get_secret_value()
-			totp_instruction = '如出现 TOTP 2FA，输入 <secret>login_bu_2fa_code</secret>。'
+		sensitive_values: dict[str, str] = {}
+		if login_config.username and login_config.password:
+			sensitive_values = {
+				'login_username': login_config.username.get_secret_value(),
+				'login_password': login_config.password.get_secret_value(),
+			}
+			totp_instruction = '如出现 TOTP 2FA，调用 request_human_verification。'
+			if login_config.totp_secret:
+				sensitive_values['login_bu_2fa_code'] = login_config.totp_secret.get_secret_value()
+				totp_instruction = '如出现 TOTP 2FA，输入 <secret>login_bu_2fa_code</secret>。'
 
-		login_task = f"""
+			agent_task = f"""
 使用 navigate 动作打开 {target_url}
 定位登录表单，输入 <secret>login_username</secret> 和 <secret>login_password</secret>，然后提交。
 登录提交最多尝试 {login_config.max_attempts} 次。
@@ -160,9 +160,15 @@ async def main():
 确认登录成功后再执行以下任务：
 {after_login_task}
 """.strip()
+		else:
+			agent_task = f"""
+使用 navigate 动作打开 {target_url}
+未配置登录凭据，不要尝试自动登录，直接执行以下任务：
+{after_login_task}
+""".strip()
 
 		agent = Agent(
-			task=login_task,
+			task=agent_task,
 			llm=ChatOpenAI(
 				model=openai_model,
 				api_key=openai_api_key,
@@ -173,7 +179,7 @@ async def main():
 			),
 			browser=browser,
 			tools=tools,
-			sensitive_data={origin: sensitive_values},
+			sensitive_data={origin: sensitive_values} if sensitive_values else None,
 			initial_actions=[{'navigate': {'url': target_url, 'new_tab': False}}],
 			max_failures=login_config.agent_max_failures,
 			use_vision='auto',
