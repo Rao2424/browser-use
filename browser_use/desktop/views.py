@@ -23,6 +23,7 @@ class DesktopControlType(StrEnum):
 	TREE_ITEM = 'TreeItem'
 	TEXT = 'Text'
 	WINDOW = 'Window'
+	OTHER = 'Other'
 
 
 class DesktopScrollDirection(StrEnum):

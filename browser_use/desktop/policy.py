@@ -47,6 +47,7 @@ class DesktopApplicationSpec(BaseModel):
 	application: DesktopApplication
 	display_name: str
 	executable_names: frozenset[str]
+	launch_command: str
 
 
 class DesktopReadSessionGrant(BaseModel):
@@ -99,11 +100,13 @@ DEFAULT_APPLICATION_SPECS = {
 		application=DesktopApplication.WECHAT,
 		display_name='WeChat for Windows',
 		executable_names=frozenset({'WeChat.exe'}),
+		launch_command='WeChat.exe',
 	),
 	DesktopApplication.NOTEPAD: DesktopApplicationSpec(
 		application=DesktopApplication.NOTEPAD,
 		display_name='Windows Notepad',
 		executable_names=frozenset({'notepad.exe'}),
+		launch_command='notepad.exe',
 	),
 }
 
